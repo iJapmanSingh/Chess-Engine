@@ -61,13 +61,32 @@ public class Board {
         return darkPieces;
     }
 
+    public Square getSquare(Location location) {
+        return locationSquareMap.get(location);
+    }
+
+    public List<AbstractPiece> getPieces(PieceColor color) {
+        return color == PieceColor.LIGHT ? lightPieces : darkPieces;
+    }
+
+    public void addPiece(AbstractPiece piece) {
+        getPieces(piece.getPieceColor()).add(piece);
+    }
+
+    public void removePiece(AbstractPiece piece) {
+        getPieces(piece.getPieceColor()).remove(piece);
+    }
+
     public void printBoard(){
         for(int i =0 ; i < boardSquares.length ; i++){
             System.out.print(BOARD_LENGTH - i + " ");
             for(int j =0 ; j < boardSquares[i].length ; j++){
                 if(boardSquares[i][j].isOccupied()){
                     AbstractPiece piece = boardSquares[i][j].getCurrentPiece();
-                    System.out.print(piece.getName().charAt(0) + " ");
+                    // Knight -> N (K is the King); LIGHT = UPPERCASE, DARK = lowercase
+                    char symbol = piece.getName().equals("Knight") ? 'N' : piece.getName().charAt(0);
+                    System.out.print((piece.getPieceColor() == PieceColor.LIGHT
+                            ? Character.toUpperCase(symbol) : Character.toLowerCase(symbol)) + " ");
                 }else{
                     System.out.print("- ");
                 }

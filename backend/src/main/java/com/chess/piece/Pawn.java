@@ -11,8 +11,6 @@ import java.util.Map;
 
 public class Pawn extends AbstractPiece implements Movable {
 
-    private boolean isFirstMove = true;
-
     public Pawn(PieceColor pieceColor) {
         super(pieceColor);
         this.name = "Pawn";
@@ -30,7 +28,10 @@ public class Pawn extends AbstractPiece implements Movable {
         Location oneStep = LocationFactory.build(current, 0, direction);
         if (oneStep != null && squareMap.containsKey(oneStep) && !squareMap.get(oneStep).isOccupied()) {
             moveCandidates.add(oneStep);
-            if (isFirstMove) {
+            // Start rank is derived from position (not a flag) so the engine can
+            // simulate a move and undo it without corrupting pawn state.
+            boolean onStartRank = current.getRank() == (direction == 1 ? 2 : 7);
+            if (onStartRank) {
                 Location twoStep = LocationFactory.build(current, 0, 2 * direction);
                 if (twoStep != null && squareMap.containsKey(twoStep) && !squareMap.get(twoStep).isOccupied()) {
                     moveCandidates.add(twoStep);
@@ -56,11 +57,5 @@ public class Pawn extends AbstractPiece implements Movable {
     @Override
     public List<Location> getValidMoves(Board board, Square square) {
         return List.of();
-    }
-
-    @Override
-    public void makeMoves(Square square) {
-        super.makeMoves(square);
-        isFirstMove = false;
     }
 }
