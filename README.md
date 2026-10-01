@@ -2,9 +2,9 @@
 
 A two-player online chess game. One person starts a game and shares a link or a 6-character code; the other joins and you play in real time from separate devices. No accounts, no sign-up.
 
-The rules engine is written from scratch in Java (no chess libraries). It is wrapped in a Spring Boot REST API and played through a React UI. The whole thing is deployed on AWS.
+The rules engine is written from scratch in Java (no chess libraries). It is wrapped in a Spring Boot REST API and played through a React UI. The whole thing is deployed on AWS behind CloudFront (HTTPS).
 
-**Live demo:** http://13.201.74.123 *(running on a small EC2 instance; may be offline when I'm not using it)*
+**Live demo:** https://d126mb8yipb4b0.cloudfront.net *(runs on a small EC2 instance; may be offline when I'm not using it)*
 
 <!-- Add a screenshot: save it as docs/screenshot.png and uncomment the line below -->
 <!-- ![Chess board](docs/screenshot.png) -->
@@ -24,10 +24,11 @@ The rules engine is written from scratch in Java (no chess libraries). It is wra
 
 ```mermaid
 flowchart LR
-    B[Browser<br/>React UI] -->|HTTP :80| N[nginx<br/>on EC2]
-    N -->|"/"| F[React build<br/>static files]
-    N -->|"/api/*"| S[Spring Boot :8080<br/>managed by systemd]
-    S --> E[ChessGame<br/>hand-written engine]
+    B["Browser<br/>React UI"] -->|HTTPS| C["CloudFront"]
+    C -->|"/ (default)"| S3["S3 bucket<br/>React build, private"]
+    C -->|"/api/* (HTTP :80)"| N["nginx<br/>on EC2"]
+    N --> S["Spring Boot :8080<br/>managed by systemd"]
+    S --> E["ChessGame<br/>hand-written engine"]
 ```
 
 ```
@@ -47,7 +48,7 @@ Each piece generates its own pseudo-legal moves; `MoveValidator` then makes each
 | Backend | Java 17+, Spring Boot 3.3 (REST) |
 | Engine | Plain Java, no dependencies |
 | Tests | JUnit 5 |
-| Hosting | AWS EC2 (Amazon Linux 2023), nginx, systemd |
+| Hosting | AWS CloudFront (Free plan), S3 (private bucket), EC2 (Amazon Linux 2023), nginx, systemd |
 
 ## Run locally
 
@@ -109,14 +110,22 @@ Engine tests cover: White moves first, fool's mate, answering a check, a pinned 
 ## Deployment (AWS)
 
 ```
-Browser ──http──► EC2 (nginx :80) ──/──────► /usr/share/nginx/html   (React build)
-                                  └─/api/*──► localhost:8080         (Spring Boot jar)
+Browser ──HTTPS──► CloudFront ──default (/)──► S3 bucket        (React build, private)
+                       │
+                       └──/api/*──HTTP :80──► EC2: nginx ──► Spring Boot :8080 (systemd)
 ```
 
-- **EC2:** `t3.micro`-class instance running Amazon Linux 2023 with Amazon Corretto 21
-- **systemd** runs the Spring Boot jar, restarts it on failure and starts it on boot
-- **nginx** serves the React files and reverse-proxies `/api/` to Spring Boot, so the browser talks to one address (no CORS)
-- **Security group:** SSH (22) from my IP only, HTTP (80) from anywhere. Port 8080 only needs to be open for debugging, since nginx reaches Spring Boot on the same machine
+- **CloudFront** is the single public entry point and gives the site HTTPS. Because the page and the API share one address, the browser never makes a cross-site call or a mixed-content (HTTPS page → HTTP API) request.
+- **S3** holds the React build in a private bucket. CloudFront reads it through Origin Access Control, so the bucket is not public. Default root object: `index.html`.
+- **`/api/*` behavior** forwards to the EC2 server (HTTP, port 80) with all HTTP methods allowed, the *CachingDisabled* cache policy (so polling never sees a stale board) and the *AllViewerExceptHostHeader* origin request policy (so query strings like `?from=E2` reach the server).
+- **nginx** on EC2 reverse-proxies `/api/` to Spring Boot on the same machine.
+- **systemd** runs the Spring Boot jar, restarts it on failure and starts it on boot.
+- **EC2:** `t3.micro`-class instance running Amazon Linux 2023 with Amazon Corretto 21.
+- **Security group:** SSH (22) from my IP only, HTTP (80) from anywhere (CloudFront connects to it). Port 8080 is not exposed, since nginx reaches Spring Boot on the same machine.
+
+### CORS
+
+Browsers add an `Origin` header to POST requests, and Spring rejects a request whose origin isn't allowed (403 "Invalid CORS request"). The CloudFront address must therefore be in `app.cors.allowed-origins` (in `application.properties`). On the server it can also be set without a rebuild through the `APP_CORS_ALLOWED_ORIGINS` environment variable in a systemd drop-in (`/etc/systemd/system/chess.service.d/cors.conf`).
 
 ### Deploy / update
 
@@ -129,10 +138,12 @@ cd ../frontend && npm install && npm run build
 scp -i ~/.ssh/<key>.pem backend/target/chess-backend-0.0.1.jar ec2-user@<server-ip>:~/chess-backend.jar
 ssh -i ~/.ssh/<key>.pem ec2-user@<server-ip> "sudo systemctl restart chess"
 
-# frontend: upload the build and copy it into nginx's folder
-scp -i ~/.ssh/<key>.pem -r frontend/dist ec2-user@<server-ip>:~/
-ssh -i ~/.ssh/<key>.pem ec2-user@<server-ip> "sudo rm -rf /usr/share/nginx/html/* && sudo cp -r ~/dist/* /usr/share/nginx/html/"
+# frontend: upload the build to S3, then clear CloudFront's cache
+aws s3 sync frontend/dist/ s3://<bucket-name> --delete
+aws cloudfront create-invalidation --distribution-id <distribution-id> --paths "/*"
 ```
+
+(The frontend can also be uploaded from the S3 console; either way, create an invalidation for `/*` afterwards so visitors get the new files.)
 
 Logs: `sudo journalctl -u chess -n 50` (backend) and `sudo journalctl -u nginx -n 50` (nginx).
 
@@ -142,13 +153,14 @@ Logs: `sudo journalctl -u chess -n 50` (backend) and `sudo journalctl -u nginx -
 
 **Technical limitations:**
 - Games live in memory and are lost when the server restarts
-- Plain HTTP only (no TLS). Adding CloudFront + HTTPS is planned, which would also let the "Copy invite link" button use the clipboard directly
-- The UI polls every second; WebSockets would be more efficient
+- Traffic is HTTPS from the browser to CloudFront, but plain HTTP from CloudFront to the EC2 server (so it is not encrypted end to end)
+- The UI polls every second, and each poll counts as a CloudFront request; WebSockets would be more efficient
 - Finished games are not saved
 
 **Ideas:**
-- Save finished games (moves, result) in PostgreSQL on RDS
-- WebSockets (STOMP) instead of polling
+- Save finished games (moves, result) in PostgreSQL
+- WebSockets (STOMP) instead of polling, or pause polling while the tab is hidden
+- Custom domain + certificate so CloudFront can use HTTPS to the origin too
 - Castling and en passant
 - Move history and a rematch button
 - CI/CD with GitHub Actions
